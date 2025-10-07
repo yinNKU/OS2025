@@ -1,0 +1,109 @@
+enovo@wzs:~/os/lab1/lab1$  make gdb
+riscv64-unknown-elf-gdb \
+    -ex 'file bin/kernel' \
+    -ex 'set arch riscv:rv64' \
+    -ex 'target remote localhost:1234'
+GNU gdb (GDB) 16.3.90.20250610-git
+Copyright (C) 2024 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "--host=x86_64-pc-linux-gnu --target=riscv64-unknown-elf".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word".
+Reading symbols from bin/kernel...
+The target architecture is set to "riscv:rv64".
+Remote debugging using localhost:1234
+0x0000000000001000 in ?? ()
+(gdb) x/10i $pc
+=> 0x1000:      auipc   t0,0x0
+   0x1004:      addi    a1,t0,32
+   0x1008:      csrr    a0,mhartid
+   0x100c:      ld      t0,24(t0)
+   0x1010:      jr      t0
+   0x1014:      unimp
+   0x1016:      unimp
+   0x1018:      unimp
+   0x101a:      .insn   2, 0x8000
+   0x101c:      unimp
+(gdb) si
+0x0000000000001004 in ?? ()
+(gdb) si
+0x0000000000001008 in ?? ()
+(gdb) si
+0x000000000000100c in ?? ()
+(gdb) info r t0
+t0             0x1000   4096
+(gdb)  si
+0x0000000000001010 in ?? ()
+(gdb) info r t0
+t0             0x80000000       2147483648
+(gdb) si
+0x0000000080000000 in ?? ()
+(gdb) break *0x80200000
+Breakpoint 1 at 0x80200000: file kern/init/entry.S, line 7.
+(gdb) continue
+Continuing.
+
+Breakpoint 1, kern_entry () at kern/init/entry.S:7
+7           la sp, bootstacktop
+(gdb) x/10i $pc
+=> 0x80200000 <kern_entry>:     auipc   sp,0x3
+   0x80200004 <kern_entry+4>:   mv      sp,sp
+   0x80200008 <kern_entry+8>:   j       0x8020000a <kern_init>
+   0x8020000a <kern_init>:      auipc   a0,0x3
+   0x8020000e <kern_init+4>:    addi    a0,a0,-2
+   0x80200012 <kern_init+8>:    auipc   a2,0x3
+   0x80200016 <kern_init+12>:   addi    a2,a2,-10
+   0x8020001a <kern_init+16>:   addi    sp,sp,-16
+   0x8020001c <kern_init+18>:   li      a1,0
+   0x8020001e <kern_init+20>:   sub     a2,a2,a0
+(gdb) si
+0x0000000080200004 in kern_entry () at kern/init/entry.S:7
+7           la sp, bootstacktop
+(gdb) si
+9           tail kern_init
+(gdb) si
+kern_init () at kern/init/init.c:8
+8           memset(edata, 0, end - edata);
+(gdb) si
+0x000000008020000e      8           memset(edata, 0, end - edata);
+(gdb) break kern/init/init.c:12
+Breakpoint 2 at 0x8020003a: file kern/init/init.c, line 12.
+(gdb) continue
+Continuing.
+
+Breakpoint 2, kern_init () at kern/init/init.c:12
+12         while (1)
+(gdb)
+另一个make debug的窗口：
+enovo@wzs:~/os/lab1/lab1$ make debug
+
+OpenSBI v0.4 (Jul  2 2019 11:53:53)
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name          : QEMU Virt Machine
+Platform HART Features : RV64ACDFIMSU
+Platform Max HARTs     : 8
+Current Hart           : 0
+Firmware Base          : 0x80000000
+Firmware Size          : 112 KB
+Runtime SBI Version    : 0.1
+
+PMP0: 0x0000000080000000-0x000000008001ffff (A)
+PMP1: 0x0000000000000000-0xffffffffffffffff (A,R,W,X)
+(THU.CST) os is loading ...
