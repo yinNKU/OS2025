@@ -92,12 +92,17 @@ static void page_init(void) {
         SetPageReserved(pages + i);
     }
 
-    uintptr_t freemem = PADDR((uintptr_t)pages + sizeof(struct Page) * (npage - nbase));
+    uintptr_t freemem = PADDR((uintptr_t)pages + sizeof(struct Page) * (npage - nbase));//pages的数组空间
+    
+        // Diagnostic prints to debug init ranges and possible overlaps
+    cprintf("[pmm] pages=%p npage=%lu nbase=%lu pages_array_bytes=%lu freemem=0x%016lx\n",
+        pages, (unsigned long)npage, (unsigned long)nbase,
+        (unsigned long)(sizeof(struct Page) * (npage - nbase)), (unsigned long)freemem);
 
     mem_begin = ROUNDUP(freemem, PGSIZE);
     mem_end = ROUNDDOWN(mem_end, PGSIZE);
     if (freemem < mem_end) {
-        init_memmap(pa2page(mem_begin), (mem_end - mem_begin) / PGSIZE);
+        init_memmap(pa2page(mem_begin), (mem_end - mem_begin) / PGSIZE);//真实物理页的空间
     }
 }
 

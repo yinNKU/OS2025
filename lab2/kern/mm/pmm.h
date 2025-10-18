@@ -43,6 +43,12 @@ size_t nr_free_pages(void); // number of free pages
 #define free_page(page) free_pages(page, 1)
 
 
+// 外部函数	                           对应的 struct pmm_manager 成员	           作用
+// alloc_pages(size_t n)	          pmm_manager->alloc_pages	             分配 n 个连续物理页，返回起始页的 struct Page*
+// free_pages(struct Page *base, size_t n)	pmm_manager->free_pages	         释放从 base 开始的 n 个物理页，重新放回空闲链表
+// nr_free_pages(void)	               pmm_manager->nr_free_pages	         返回当前系统中 空闲物理页的总数
+
+
 /* *
  * PADDR - takes a kernel virtual address (an address that points above
  * KERNBASE),
@@ -75,9 +81,9 @@ size_t nr_free_pages(void); // number of free pages
         (void *)(__m_pa + va_pa_offset);                         \
     })
 */
-extern struct Page *pages;
-extern size_t npage;
-extern const size_t nbase;
+extern struct Page *pages;//begin of physical page array
+extern size_t npage;// amount of pages total  memory. npage - nbase = amount of pages in physical memory
+extern const size_t nbase;//amount of pages before physical memory
 extern uint64_t va_pa_offset;
 
 static inline ppn_t page2ppn(struct Page *page) { return page - pages + nbase; }

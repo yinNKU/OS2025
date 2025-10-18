@@ -23,12 +23,9 @@
  * Internal page allocator (best-fit style)
  * ----------------------------- */
 
-typedef struct {
-    list_entry_t free_list;     // head of free block list (blocks are head pages)
-    unsigned int nr_free;       // number of free pages in total
-} slub_free_area_t;
 
-static slub_free_area_t slub_free_area;
+
+static free_area_t slub_free_area;
 
 #define slub_free_list (slub_free_area.free_list)
 #define slub_nr_free   (slub_free_area.nr_free)
@@ -106,7 +103,11 @@ static void slub_page_free_pages(struct Page *base, size_t n) {
     assert(n > 0);
     struct Page *p = base;
     for (; p != base + n; p++) {
-        assert(!PageReserved(p) && !PageProperty(p));
+        if (PageReserved(p) || PageProperty(p)) {
+            cprintf("[slub] free_pages bad page: p=%p flags=%lx prop=%u base=%p n=%lu\n",
+                    p, p->flags, p->property, base, (unsigned long)n);
+            assert(!PageReserved(p) && !PageProperty(p));
+        }
         p->flags = 0;
         set_page_ref(p, 0);
     }
@@ -126,7 +127,11 @@ static void slub_page_free_pages(struct Page *base, size_t n) {
     if (prev != &slub_free_list) {
         struct Page *pp = le2page(prev, page_link);
         if (pp + pp->property == base) {
+            // absorb base into prev head 'pp'
             pp->property += base->property;
+            // base ceases to be a head: clear its property bit/field
+            ClearPageProperty(base);
+            base->property = 0;
             list_del(&(base->page_link));
             base = pp;
         }
@@ -136,7 +141,11 @@ static void slub_page_free_pages(struct Page *base, size_t n) {
     if (next != &slub_free_list) {
         struct Page *pn = le2page(next, page_link);
         if (base + base->property == pn) {
+            // absorb next head 'pn' into current head 'base'
             base->property += pn->property;
+            // pn ceases to be a head: clear its property bit/field
+            ClearPageProperty(pn);
+            pn->property = 0;
             list_del(&(pn->page_link));
         }
     }
@@ -366,19 +375,59 @@ static void slub_free_pages_iface(struct Page *base, size_t n) {
 static size_t slub_nr_free_pages_iface(void) { return slub_page_nr_free_pages(); }
 
 static void slub_check(void) {
-    // Basic sanity: allocate and free a few pages
-    struct Page *a = slub_alloc_pages_iface(1);
-    struct Page *b = slub_alloc_pages_iface(2);
-    assert(a != NULL && b != NULL && a != b);
-    slub_free_pages_iface(a, 1);
-    slub_free_pages_iface(b, 2);
+    // More comprehensive tests for page allocator and SLUB behavior
+    size_t free0 = slub_nr_free_pages_iface();
 
-    // Optional: quick kmalloc smoke test
-    void *p = kmalloc(64);
-    void *q = kmalloc(32);
-    assert(p != NULL && q != NULL);
-    kfree(p);
-    kfree(q);
+    // 1) Basic allocate/free and free count accounting
+    struct Page *a1 = slub_alloc_pages_iface(1);
+    struct Page *a2 = slub_alloc_pages_iface(2);
+    struct Page *a3 = slub_alloc_pages_iface(3);
+    assert(a1 != NULL && a2 != NULL && a3 != NULL);
+    assert(a1 != a2 && a1 != a3 && a2 != a3);
+    assert(slub_nr_free_pages_iface() == free0 - (1 + 2 + 3));
+
+    // 2) Mapping round-trip: Page* -> KVA -> PA -> Page*
+    void *kva_a1 = page2kva(a1);
+    uintptr_t pa_a1 = (uintptr_t)kva_a1 - va_pa_offset;
+    struct Page *back_a1 = pa2page(pa_a1);
+    assert(back_a1 == a1);
+
+    // 3) Coalescing check (order independent): free middle then head, then alloc exact-fit
+    slub_free_pages_iface(a2, 2);   // free 2-page block
+    slub_free_pages_iface(a1, 1);   // free adjacent 1-page block, should merge to 3
+    struct Page *a13 = slub_alloc_pages_iface(3); // exact fit, best-fit should return some 3-page block
+    assert(a13 != NULL);
+
+    // 4) Free everything and verify free count restored
+    slub_free_pages_iface(a13, 3);
+    slub_free_pages_iface(a3, 3);
+    assert(slub_nr_free_pages_iface() == free0);
+
+    // 5) SLUB object allocator: force multiple slabs and transitions
+    // pick 64B class; allocate more than one slab worth of objects
+    const size_t obj_size = 64;
+    void *objs[128];
+    size_t nobj = 0;
+    for (; nobj < 128; nobj++) {
+        void *p = kmalloc(obj_size);
+        assert(p != NULL);
+        // simple write pattern to verify object memory is writable and distinct
+        ((volatile char *)p)[0] = (char)(nobj & 0x7F);
+        ((volatile char *)p)[obj_size - 1] = (char)((nobj * 3) & 0x7F);
+        objs[nobj] = p;
+    }
+    // free in alternating order to exercise partial/full list relinks
+    for (size_t i = 0; i < nobj; i += 2) {
+        kfree(objs[i]);
+    }
+    for (size_t i = 1; i < nobj; i += 2) {
+        kfree(objs[i]);
+    }
+
+    // After all objects are freed, all slabs should be destroyed and their pages returned.
+    // Not all those pages were uniquely allocated for slabs (depends on cache capacity),
+    // but free count must at least be back to free0 if SLUB promptly returns empty slabs.
+    assert(slub_nr_free_pages_iface() == free0);
 }
 
 const struct pmm_manager slub_pmm_manager = {

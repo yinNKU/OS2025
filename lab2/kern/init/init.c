@@ -26,8 +26,8 @@ void print_kerninfo(void) {
 }
 
 int kern_init(void) {
-    extern char edata[], end[];
-    memset(edata, 0, end - edata);
+    extern char edata[], end[];//链接器定义，edata是数据段的结束地址，end是bss段的结束地址
+    memset(edata, 0, end - edata);//清零bss段
     dtb_init();
     cons_init();  // init the console
     const char *message = "(THU.CST) os is loading ...\0";
