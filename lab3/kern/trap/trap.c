@@ -173,22 +173,34 @@ void exception_handler(struct trapframe *tf) {
             break;
         case CAUSE_FAULT_FETCH:
             break;
-        case CAUSE_ILLEGAL_INSTRUCTION:
+        case CAUSE_ILLEGAL_INSTRUCTION: {
              // 非法指令异常处理
              /* LAB3 CHALLENGE3   YOUR CODE :  */
             /*(1)输出指令异常类型（ Illegal instruction）
              *(2)输出异常指令地址
              *(3)更新 tf->epc寄存器
             */
+            uintptr_t fault_epc = tf->epc;
+            cprintf("Illegal instruction caught at 0x%016llx\n",
+                    (unsigned long long)fault_epc);
+            cprintf("Exception type: Illegal instruction\n");
+            tf->epc = fault_epc + 4;
             break;
-        case CAUSE_BREAKPOINT:
+        }
+        case CAUSE_BREAKPOINT: {
             //断点异常处理
             /* LAB3 CHALLLENGE3   YOUR CODE :  */
             /*(1)输出指令异常类型（ breakpoint）
              *(2)输出异常指令地址
              *(3)更新 tf->epc寄存器
             */
+            uintptr_t fault_epc = tf->epc;
+            cprintf("ebreak caught at 0x%016llx\n",
+                    (unsigned long long)fault_epc);
+            cprintf("Exception type: breakpoint\n");
+            tf->epc = fault_epc + 4;
             break;
+        }
         case CAUSE_MISALIGNED_LOAD:
             break;
         case CAUSE_FAULT_LOAD:
@@ -211,6 +223,7 @@ void exception_handler(struct trapframe *tf) {
     }
 }
 
+
 static inline void trap_dispatch(struct trapframe *tf) {
     if ((intptr_t)tf->cause < 0) {
         // interrupts
@@ -231,3 +244,4 @@ void trap(struct trapframe *tf) {
     // dispatch based on what type of trap occurred
     trap_dispatch(tf);
 }
+
