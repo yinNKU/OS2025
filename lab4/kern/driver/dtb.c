@@ -5,6 +5,8 @@
 #include <memlayout.h>
 
 // 设备树头部结构
+// 设备树告诉内核：
+// “我这个板子上有哪些设备、内存在哪儿、CPU 有几个、串口在哪儿、外设地址是多少……”
 struct fdt_header {
     uint32_t magic;          // 0xd00dfeed (big-endian)
     uint32_t totalsize;      // 整个DTB的大小

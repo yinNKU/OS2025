@@ -22,6 +22,7 @@ static void print_ticks()
 }
 
 /* idt_init - initialize IDT to each of the entry points in kern/trap/vectors.S
+中断描述符表IDT
  */
 void idt_init(void)
 {
