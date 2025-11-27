@@ -17,7 +17,7 @@
 #include <sbi.h>
 
 #define TICK_NUM 100
-
+static size_t tick_prints;
 static void print_ticks()
 {
     cprintf("%d ticks\n", TICK_NUM);

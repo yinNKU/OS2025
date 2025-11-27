@@ -334,7 +334,7 @@ put_kstack(struct proc_struct *proc)
 static int
 setup_pgdir(struct mm_struct *mm)
 {
-    struct Page *page;
+    struct Page *page = NULL;
     if ((page = alloc_page()) == NULL)
     {
         return -E_NO_MEM;
@@ -409,7 +409,7 @@ bad_mm:
 static void
 copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf)
 {
-    proc->tf = (struct trapframe *)(proc->kstack + KSTACKSIZE) - 1;
+    proc->tf = (struct trapframe *)(proc->kstack + KSTACKSIZE - sizeof(struct trapframe));
     *(proc->tf) = *tf;
 
     // Set a0 to 0 so a child process knows it's just forked
@@ -737,6 +737,17 @@ load_icode(unsigned char *binary, size_t size)
      *          tf->status should be appropriate for user program (the value of sstatus)
      *          hint: check meaning of SPP, SPIE in SSTATUS, use them by SSTATUS_SPP, SSTATUS_SPIE(defined in risv.h)
      */
+    /* Set user stack pointer to the top of the user stack */
+    tf->gpr.sp = USTACKTOP;
+    /* Set the program counter to the ELF entry point */
+    tf->epc = elf->e_entry;
+    /* Prepare sstatus for returning to user mode:
+     * - clear SPP (previous privilege = User)
+     * - set SPIE so interrupts will be enabled after sret
+     * - clear SIE in the saved status to keep interrupts disabled until sret restores SPIE
+     */
+    tf->status = (sstatus & ~SSTATUS_SPP) | SSTATUS_SPIE;
+    tf->status &= ~SSTATUS_SIE;
 
     ret = 0;
 out:

@@ -423,6 +423,22 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end,
              * (4) build the map of phy addr of  nage with the linear addr start
              */
 
+            /* (1) kernel virtual addr of source page */
+            void *src_kvaddr = page2kva(page);
+            /* (2) kernel virtual addr of destination page */
+            void *dst_kvaddr = page2kva(npage);
+            /* (3) copy entire page content */
+            memcpy(dst_kvaddr, src_kvaddr, PGSIZE);
+            /* (4) insert the new page into destination page directory */
+            ret = page_insert(to, npage, start, perm);
+            if (ret != 0)
+            {
+                free_page(npage);
+                return -E_NO_MEM;
+            }
+            /* record the virtual address for the page's bookkeeping */
+            npage->pra_vaddr = start;
+
             assert(ret == 0);
         }
         start += PGSIZE;
