@@ -218,7 +218,7 @@ int dup_mmap(struct mm_struct *to, struct mm_struct *from)
 
         insert_vma_struct(to, nvma);
 
-        bool share = 0;
+        bool share = 1;
         if (copy_range(to->pgdir, from->pgdir, vma->vm_start, vma->vm_end, share) != 0)
         {
             return -E_NO_MEM;
@@ -381,4 +381,80 @@ bool user_mem_check(struct mm_struct *mm, uintptr_t addr, size_t len, bool write
         return 1;
     }
     return KERN_ACCESS(addr, addr + len);
+}
+
+int do_pgfault(struct mm_struct *mm, uint32_t error_code, uintptr_t addr) {
+    int ret = -E_INVAL;
+    struct vma_struct *vma = find_vma(mm, addr);
+
+    if (vma == NULL || vma->vm_start > addr) {
+        cprintf("not valid addr %x, and  can not find it in vma\n", addr);
+        goto failed;
+    }
+
+    switch (error_code) {
+        case CAUSE_STORE_PAGE_FAULT:
+            if (!(vma->vm_flags & VM_WRITE)) {
+                cprintf("do_pgfault failed: store page fault, but the addr's vma cannot write\n");
+                goto failed;
+            }
+            break;
+        case CAUSE_LOAD_PAGE_FAULT:
+            if (!(vma->vm_flags & VM_READ)) {
+                cprintf("do_pgfault failed: load page fault, but the addr's vma cannot read\n");
+                goto failed;
+            }
+            break;
+        case CAUSE_FETCH_PAGE_FAULT:
+            if (!(vma->vm_flags & VM_EXEC)) {
+                cprintf("do_pgfault failed: fetch page fault, but the addr's vma cannot exec\n");
+                goto failed;
+            }
+            break;
+        default:
+            cprintf("do_pgfault failed: unknown error code\n");
+            goto failed;
+    }
+
+    addr = ROUNDDOWN(addr, PGSIZE);
+    pte_t *ptep = NULL;
+    ptep = get_pte(mm->pgdir, addr, 0);
+
+    if (ptep != NULL && (*ptep & PTE_V)) {
+        if (error_code == CAUSE_STORE_PAGE_FAULT && (*ptep & PTE_COW)) {
+            struct Page *page = pte2page(*ptep);
+            if (page->ref == 1) {
+                 *ptep = (*ptep & ~PTE_COW) | PTE_W;
+                 tlb_invalidate(mm->pgdir, addr);
+                 return 0;
+            }
+            struct Page *npage = alloc_page();
+            if (npage == NULL) {
+                return -E_NO_MEM;
+            }
+            memcpy(page2kva(npage), page2kva(page), PGSIZE);
+            uint32_t perm = (*ptep & PTE_USER) | PTE_W;
+            perm &= ~PTE_COW;
+            if (page_insert(mm->pgdir, npage, addr, perm) != 0) {
+                free_page(npage);
+                return -E_NO_MEM;
+            }
+            return 0;
+        }
+    }
+
+    if (ptep == NULL || !(*ptep & PTE_V)) {
+        uint32_t perm = PTE_U | PTE_V;
+        if (vma->vm_flags & VM_READ) perm |= PTE_R;
+        if (vma->vm_flags & VM_WRITE) perm |= PTE_W;
+        if (vma->vm_flags & VM_EXEC) perm |= PTE_X;
+        
+        if (pgdir_alloc_page(mm->pgdir, addr, perm) == NULL) {
+             return -E_NO_MEM;
+        }
+    }
+    
+    return 0;
+failed:
+    return ret;
 }

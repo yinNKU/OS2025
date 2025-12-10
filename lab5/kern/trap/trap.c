@@ -17,6 +17,7 @@
 #include <sbi.h>
 
 #define TICK_NUM 100
+static int tick_prints = 0;
 
 static void print_ticks()
 {
@@ -213,13 +214,20 @@ void exception_handler(struct trapframe *tf)
         cprintf("Environment call from M-mode\n");
         break;
     case CAUSE_FETCH_PAGE_FAULT:
-        cprintf("Instruction page fault\n");
-        break;
     case CAUSE_LOAD_PAGE_FAULT:
-        cprintf("Load page fault\n");
-        break;
     case CAUSE_STORE_PAGE_FAULT:
-        cprintf("Store/AMO page fault\n");
+        if ((ret = do_pgfault(current->mm, tf->cause, tf->tval)) != 0) {
+            print_trapframe(tf);
+            if (current == NULL) {
+                panic("handle pgfault failed. %e\n", ret);
+            } else {
+                if (trap_in_kernel(tf)) {
+                    panic("handle pgfault failed in kernel mode. %e\n", ret);
+                }
+                cprintf("killed by pgfault failed\n");
+                do_exit(-E_KILLED);
+            }
+        }
         break;
     default:
         print_trapframe(tf);

@@ -118,6 +118,7 @@ alloc_proc(void)
         proc->pgdir = boot_pgdir_pa; // 页目录使用内核页表 (boot_pgdir_pa)
         proc->flags = 0;              // 无特殊标志
         memset(proc->name, 0, PROC_NAME_LEN + 1); // 清空进程名
+        proc->cptr = proc->optr = proc->yptr = NULL;
     }
     return proc;
 }
@@ -492,13 +493,10 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
 
     // 8. 加入进程链表和哈希表
     hash_proc(proc);
-    list_add(&proc_list, &(proc->list_link));
+    set_links(proc);
 
     // 9. 进程状态改为可运行
     wakeup_proc(proc);
-
-    // 10. 增加全局计数
-    nr_process++;
 
     // 返回子进程 pid
     ret = proc->pid;
@@ -737,6 +735,9 @@ load_icode(unsigned char *binary, size_t size)
      *          tf->status should be appropriate for user program (the value of sstatus)
      *          hint: check meaning of SPP, SPIE in SSTATUS, use them by SSTATUS_SPP, SSTATUS_SPIE(defined in risv.h)
      */
+    tf->gpr.sp = USTACKTOP;
+    tf->epc = elf->e_entry;
+    tf->status = (sstatus & ~SSTATUS_SPP) | SSTATUS_SPIE;
 
     ret = 0;
 out:
@@ -945,7 +946,7 @@ user_main(void *arg)
 #ifdef TEST
     KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
 #else
-    KERNEL_EXECVE(exit);
+    KERNEL_EXECVE(cowtest);
 #endif
     panic("user_main execve failed.\n");
 }
