@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <ulib.h>
 
-int zero;
+volatile int zero;
 
 int
 main(void) {

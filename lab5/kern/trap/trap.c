@@ -135,6 +135,9 @@ void interrupt_handler(struct trapframe *tf)
             if (tick_prints == 10) {
                 sbi_shutdown();
             }
+            if (current != NULL) {
+                current->need_resched = 1;
+            }
         }
         break;
     case IRQ_H_TIMER:
@@ -168,12 +171,15 @@ void exception_handler(struct trapframe *tf)
     {
     case CAUSE_MISALIGNED_FETCH:
         cprintf("Instruction address misaligned\n");
+        do_exit(-E_KILLED);
         break;
     case CAUSE_FETCH_ACCESS:
         cprintf("Instruction access fault\n");
+        do_exit(-E_KILLED);
         break;
     case CAUSE_ILLEGAL_INSTRUCTION:
         cprintf("Illegal instruction\n");
+        do_exit(-E_KILLED);
         break;
     case CAUSE_BREAKPOINT:
         cprintf("Breakpoint\n");
@@ -181,20 +187,26 @@ void exception_handler(struct trapframe *tf)
         {
             tf->epc += 4;
             syscall();
-            kernel_execve_ret(tf, current->kstack + KSTACKSIZE);
+            if (tf->gpr.a0 == 0)
+            {
+                kernel_execve_ret(tf, current->kstack + KSTACKSIZE);
+            }
         }
         break;
     case CAUSE_MISALIGNED_LOAD:
         cprintf("Load address misaligned\n");
+        do_exit(-E_KILLED);
         break;
     case CAUSE_LOAD_ACCESS:
         cprintf("Load access fault\n");
+        do_exit(-E_KILLED);
         break;
     case CAUSE_MISALIGNED_STORE:
         panic("AMO address misaligned\n");
         break;
     case CAUSE_STORE_ACCESS:
         cprintf("Store/AMO access fault\n");
+        do_exit(-E_KILLED);
         break;
     case CAUSE_USER_ECALL:
         // cprintf("Environment call from U-mode\n");
@@ -202,7 +214,6 @@ void exception_handler(struct trapframe *tf)
         syscall();
         break;
     case CAUSE_SUPERVISOR_ECALL:
-        cprintf("Environment call from S-mode\n");
         tf->epc += 4;
         syscall();
         break;
@@ -213,13 +224,16 @@ void exception_handler(struct trapframe *tf)
         cprintf("Environment call from M-mode\n");
         break;
     case CAUSE_FETCH_PAGE_FAULT:
-        cprintf("Instruction page fault\n");
+        cprintf("Instruction page fault, tval=0x%016lx, epc=0x%016lx\n", tf->tval, tf->epc);
+        do_exit(-E_KILLED);
         break;
     case CAUSE_LOAD_PAGE_FAULT:
-        cprintf("Load page fault\n");
+        cprintf("Load page fault, tval=0x%016lx, epc=0x%016lx\n", tf->tval, tf->epc);
+        do_exit(-E_KILLED);
         break;
     case CAUSE_STORE_PAGE_FAULT:
-        cprintf("Store/AMO page fault\n");
+        cprintf("Store/AMO page fault, tval=0x%016lx, epc=0x%016lx\n", tf->tval, tf->epc);
+        do_exit(-E_KILLED);
         break;
     default:
         print_trapframe(tf);

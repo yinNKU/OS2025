@@ -89,6 +89,7 @@ alloc_proc(void)
     struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
     if (proc != NULL)
     {
+        memset(proc, 0, sizeof(struct proc_struct));
         // LAB4:EXERCISE1 YOUR CODE
         /*
          * below fields in proc_struct need to be initialized
@@ -118,6 +119,11 @@ alloc_proc(void)
         proc->pgdir = boot_pgdir_pa; // 页目录使用内核页表 (boot_pgdir_pa)
         proc->flags = 0;              // 无特殊标志
         memset(proc->name, 0, PROC_NAME_LEN + 1); // 清空进程名
+        proc->exit_code = 0;
+        proc->wait_state = 0;
+        proc->cptr = proc->yptr = proc->optr = NULL;
+        list_init(&(proc->list_link));
+        list_init(&(proc->hash_link));
     }
     return proc;
 }
@@ -427,6 +433,7 @@ copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf)
  */
 int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
 {
+    cprintf("do_fork: enter clone_flags=0x%x current=%d\n", clone_flags, current ? current->pid : -1);
     int ret = -E_NO_FREE_PROC;
     struct proc_struct *proc;
     if (nr_process >= MAX_PROCESS)
@@ -488,20 +495,24 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
     proc->parent = current;
 
     // 7. 继承/设置页表：本实验内核线程共享内核页表
-    proc->pgdir = boot_pgdir_pa;
+    // If proc->mm is NULL (kernel thread), use kernel page directory.
+    // Otherwise, copy_mm already set proc->pgdir to the physical address
+    // of the newly created mm->pgdir and we must not override it.
+    if (proc->mm == NULL)
+    {
+        proc->pgdir = boot_pgdir_pa;
+    }
 
-    // 8. 加入进程链表和哈希表
+    // 8. 插入到 proc_list 并维护父子关系，同时加入 hash_list
     hash_proc(proc);
-    list_add(&proc_list, &(proc->list_link));
+    set_links(proc);
 
     // 9. 进程状态改为可运行
     wakeup_proc(proc);
 
-    // 10. 增加全局计数
-    nr_process++;
-
     // 返回子进程 pid
     ret = proc->pid;
+    cprintf("do_fork: parent=%d created child=%d\n", current->pid, ret);
     
 fork_out:
     return ret;
@@ -601,7 +612,7 @@ load_icode(unsigned char *binary, size_t size)
         goto bad_pgdir_cleanup_mm;
     }
     //(3) copy TEXT/DATA section, build BSS parts in binary to memory space of process
-    struct Page *page;
+    struct Page *page = NULL;
     //(3.1) get the file header of the bianry program (ELF format)
     struct elfhdr *elf = (struct elfhdr *)binary;
     //(3.2) get the entry of the program section headers of the bianry program (ELF format)
@@ -912,7 +923,6 @@ static int
 kernel_execve(const char *name, unsigned char *binary, size_t size)
 {
     int64_t ret = 0, len = strlen(name);
-    //   ret = do_execve(name, len, binary, size);
     asm volatile(
         "li a0, %1\n"
         "lw a1, %2\n"
@@ -953,6 +963,11 @@ kernel_execve(const char *name, unsigned char *binary, size_t size)
 static int
 user_main(void *arg)
 {
+#ifdef DEBUG_PROC
+    cprintf("user_main: pid=%d starting\n", current->pid);
+#else
+    cprintf("user_main: pid=%d starting\n", current->pid);
+#endif
 #ifdef TEST
     KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
 #else
@@ -965,6 +980,7 @@ user_main(void *arg)
 static int
 init_main(void *arg)
 {
+    cprintf("init_main: pid=%d starting\n", current->pid);
     size_t nr_free_pages_store = nr_free_pages();
     size_t kernel_allocated_store = kallocated();
 
@@ -1014,14 +1030,16 @@ void proc_init(void)
     nr_process++;
 
     current = idleproc;
-
+    cprintf("proc_init: creating init_main kernel thread\n");
     int pid = kernel_thread(init_main, NULL, 0);
+    cprintf("proc_init: kernel_thread returned pid=%d\n", pid);
     if (pid <= 0)
     {
         panic("create init_main failed.\n");
     }
 
     initproc = find_proc(pid);
+    cprintf("proc_init: find_proc returned %p (pid lookup)\n", initproc);
     set_proc_name(initproc, "init");
 
     assert(idleproc != NULL && idleproc->pid == 0);
