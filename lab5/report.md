@@ -146,6 +146,152 @@ riscv64-unknown-elf-gdb obj/<kernel-or-user-elf>
 ### 为什么在 Host 看到 C 层代码？（TCG 简述）
 QEMU 的 TCG 翻译把目标指令翻译成 host 机器代码。对复杂或特权相关的操作（如 `ecall`/`sret`），TCG 不直接内联所有语义，而是生成对 C helper 的调用（例如 `gen_helper_sret` / `generate_exception`），helper 在运行时执行复杂逻辑并通过 `exit_tb()` 让 QEMU 回到 C 层处理。
 
+## 练习1: 加载应用程序并执行
+
+### 1. 设计实现过程
+
+`load_icode` 函数的主要作用是将 ELF 格式的二进制程序加载到内存中，并为该进程建立用户态的内存空间和执行环境。我们需要补充的是第 6 步：设置 `trapframe`（中断帧），以便内核在完成加载后，能够正确地切换回用户态并开始执行应用程序。
+
+**代码实现 (kern/process/proc.c):**
+
+我们在 `load_icode` 函数的末尾添加了如下代码：
+
+```c
+    /* LAB5:EXERCISE1 YOUR CODE */
+    // 设置用户栈指针：指向用户栈的顶部
+    tf->gpr.sp = USTACKTOP;
+    
+    // 设置程序计数器 (PC/EPC)：指向 ELF 头中定义的入口点
+    tf->epc = elf->e_entry;
+    
+    // 设置 sstatus 寄存器：
+    // 1. 清除 SSTATUS_SPP 位：确保 sret 指令执行后，CPU 特权级切换回 User Mode (U-mode)。
+    // 2. 设置 SSTATUS_SPIE 位：确保返回用户态后，中断是开启的 (Enable Interrupts)。
+    tf->status = (sstatus & ~SSTATUS_SPP) | SSTATUS_SPIE;
+    
+    // 清除 SSTATUS_SIE 位：在内核态处理期间禁用中断，直到 sret 恢复 SPIE 到 SIE。
+    tf->status &= ~SSTATUS_SIE;
+```
+
+### 2. 从 RUNNING 到执行第一条指令的经过
+
+当一个用户态进程被 ucore 的调度器选择占用 CPU 执行（状态变为 RUNNING）后，到它执行应用程序第一条指令的完整过程如下：
+
+1.  **调度 (Schedule):** `schedule()` 函数决定运行该进程，调用 `proc_run(next)`。
+2.  **上下文切换 (Context Switch):** `proc_run` 调用 `switch_to`，汇编代码将 CPU 的寄存器（callee-saved registers）和栈指针切换到新进程的内核栈和上下文 (`proc->context`)。
+3.  **返回内核入口:** `switch_to` 返回，由于新进程的 `context.ra` 在 `copy_thread` 中被设置为 `forkret` 的地址，CPU 跳转到 `forkret` 函数执行。
+4.  **中断返回准备:** `forkret` 函数调用 `forkrets(current->tf)`。`forkrets` 是一段汇编代码，它将栈指针指向 `current->tf`（即我们在 `load_icode` 中设置好的 trapframe），然后跳转到 `__trapret`。
+5.  **恢复寄存器:** `__trapret` (位于 `trapentry.S`) 执行一系列 `LOAD` 指令，从 trapframe 中恢复所有的通用寄存器（包括 `a0` 等参数寄存器）和状态寄存器 (`sstatus`, `sepc`)。
+6.  **特权级切换 (sret):** 执行 `sret` 指令。
+    *   CPU 检查 `sstatus` 的 `SPP` 位（我们在 `load_icode` 中设为 0），于是将当前特权级从 Supervisor Mode 切换到 User Mode。
+    *   CPU 将程序计数器 (PC) 设置为 `sepc` 的值（即 `elf->e_entry`，应用程序入口）。
+    *   CPU 恢复中断使能状态（根据 `SPIE` 位）。
+7.  **执行用户代码:** 此时 CPU 处于用户态，PC 指向应用程序的第一条指令，SP 指向用户栈顶 (`USTACKTOP`)，应用程序开始执行。
+
+---
+
+## 练习2: 父进程复制自己的内存空间给子进程
+
+### 1. 设计实现过程
+
+`do_fork` 函数在创建子进程时，会调用 `copy_mm` -> `dup_mmap` -> `copy_range` 来复制父进程的内存空间。`copy_range` 的任务是逐页复制内存内容。
+
+**代码实现 (kern/mm/pmm.c):**
+
+我们在 `copy_range` 函数中实现了如下逻辑：
+
+```c
+            /* LAB5:EXERCISE2 YOUR CODE */
+            // 1. 获取源页面（父进程）的内核虚拟地址
+            void *src_kvaddr = page2kva(page);
+            
+            // 2. 获取目标页面（子进程，已分配）的内核虚拟地址
+            void *dst_kvaddr = page2kva(npage);
+            
+            // 3. 内存拷贝：将源页面的内容完整复制到目标页面
+            memcpy(dst_kvaddr, src_kvaddr, PGSIZE);
+            
+            // 4. 建立映射：将新页面插入到子进程的页表中
+            // 使用与父进程相同的线性地址 (start) 和权限 (perm)
+            ret = page_insert(to, npage, start, perm);
+```
+
+## 练习3: 进程执行 fork/exec/wait/exit 的实现
+
+### 1. 执行流程与用户态/内核态分析
+
+*   **fork:**
+    *   **用户态:** 调用 `fork()` 库函数，执行 `ecall` 指令陷入内核。
+    *   **内核态:** `sys_fork` -> `do_fork`。
+        *   分配 `proc_struct`，分配内核栈。
+        *   **关键:** 复制父进程的内存布局 (`copy_mm`) 和中断帧 (`copy_thread`)。
+        *   设置子进程的 `tf->gpr.a0 = 0` (子进程返回值为0)。
+        *   将子进程加入进程列表，设为 `PROC_RUNNABLE`。
+        *   父进程 `do_fork` 返回子进程 PID。
+    *   **返回:** 父进程从系统调用返回（得到 PID），子进程被调度后从 `forkret` 开始执行，最终返回用户态（得到 0）。
+
+*   **exec:**
+    *   **用户态:** 调用 `exec()`，执行 `ecall`。
+    *   **内核态:** `sys_exec` -> `do_execve`。
+        *   回收当前进程的内存空间 (`exit_mmap`)。
+        *   调用 `load_icode` 加载新的 ELF 二进制文件。
+        *   **关键:** 重新设置 `trapframe`（如练习1所述），将 PC 设为新程序入口，SP 设为新用户栈。
+    *   **返回:** `sret` 后，进程不再返回到调用 `exec` 的地方，而是从新程序的入口点开始执行。
+
+*   **wait:**
+    *   **用户态:** 调用 `wait()`，执行 `ecall`。
+    *   **内核态:** `sys_wait` -> `do_wait`。
+        *   查找是否有状态为 `PROC_ZOMBIE` 的子进程。
+        *   如果有，回收其剩余资源（`proc_struct`, 内核栈），返回其 PID 和退出码。
+        *   如果子进程还在运行，将当前进程状态设为 `PROC_SLEEPING`，并调用 `schedule()` 让出 CPU。
+    *   **交互:** 当子进程退出时会唤醒父进程，父进程从 `schedule()` 返回继续执行回收操作。
+
+*   **exit:**
+    *   **用户态:** 调用 `exit()`，执行 `ecall`。
+    *   **内核态:** `sys_exit` -> `do_exit`。
+        *   释放页表和内存空间 (`mm_destroy`)。
+        *   将状态设为 `PROC_ZOMBIE`。
+        *   唤醒父进程 (`wakeup_proc(parent)`)。
+        *   调用 `schedule()` 主动让出 CPU，且不再返回。
+
+**内核态与用户态交错:**
+程序主要在用户态运行。当需要操作系统服务（如创建进程）或发生硬件中断（如时钟中断）时，通过 `ecall` 或中断机制切换到内核态。内核在当前进程的内核栈上执行处理逻辑，处理完毕后通过 `sret` 指令恢复上下文并返回用户态。执行结果通常通过寄存器（如 RISC-V 的 `a0`）传递给用户程序。
+
+### 2. 用户态进程执行状态生命周期图
+
+```text
+   (alloc_proc)
+        |
+        V
+  +-------------+
+  | PROC_UNINIT |
+  +-------------+
+        | do_fork
+        V
+  +-------------+   scheduler/   +--------------+
+  | PROC_RUNNABLE | <----------> | PROC_RUNNING |
+  +-------------+     yield      +--------------+
+        ^     |                    |      |
+        |     | do_wait/           |      | do_exit
+ wakeup |     | do_sleep           |      |
+        |     V                    |      V
+  +-------------+                  +-------------+
+  | PROC_SLEEPING |                | PROC_ZOMBIE |
+  +-------------+                  +-------------+
+                                          |
+                                          | do_wait (by parent)
+                                          V
+                                     (reclaimed)
+```
+
+*   **NULL -> UNINIT:** `alloc_proc` 分配进程控制块。
+*   **UNINIT -> RUNNABLE:** `do_fork` 完成进程初始化。
+*   **RUNNABLE -> RUNNING:** 调度器 (`schedule`) 选中该进程。
+*   **RUNNING -> RUNNABLE:** 时间片耗尽或被抢占。
+*   **RUNNING -> SLEEPING:** 进程请求等待某个事件（如 `wait`, `sleep`）。
+*   **SLEEPING -> RUNNABLE:** 等待的事件发生（如子进程退出，被 `wakeup`）。
+*   **RUNNING -> ZOMBIE:** 进程执行结束 (`exit`)，等待父进程回收。
+*   **ZOMBIE -> NULL:** 父进程执行 `wait` 回收资源。
 ## 练习3：fork / exec / wait / exit 源码分析
 
 下面给出对 `fork`、`exec`、`wait`、`exit` 在 ucore 中实现的简要分析，包括哪些操作在用户态完成、哪些在内核态完成，以及内核与用户态如何交错执行和结果如何返回给用户程序。
