@@ -94,6 +94,55 @@ QEMU 的 TLB 查找逻辑主要在 `accel/tcg/cputlb.c` 和 `include/exec/cpu_ld
     *   **调试观察**: 当我们在 M-mode 下调试访存指令时，发现 `get_physical_address` 会直接返回 `*physical = addr` (Identity Mapping)。但是，QEMU 依然会将这个 "虚拟地址=物理地址" 的映射关系填入 SoftMMU TLB。
     *   **原因**: QEMU 为了性能统一了访存路径。无论是否开启分页，所有访存都先查 SoftMMU TLB。如果未开启分页，就填入一个恒等映射。这与真实硬件在关闭 MMU 时直接绕过 TLB 的行为在实现细节上是不同的，但对软件来说效果一致。
 
+## 扩展：Copy on Write (COW) 实现与验证
+
+### 1. 改动概览
+- **cow的实现位于分支copyonWrite，不在主分支上！**
+- 位置：`kern/mm/mmu.h`, `kern/mm/vmm.c`, `kern/mm/pmm.c`, `kern/process/proc.c`
+- 目标：在 `fork` 时共享页面为只读 + COW，写入触发缺页异常后复制页面并恢复写权限。
+
+### 2. 关键实现细节
+
+- 定义 COW 位（使用 RISC-V 页表项软件保留位 RSW）：
+    - 在 `kern/mm/mmu.h` 增加 `#define PTE_COW 0x100`。
+
+- 在 `dup_mmap` 启用共享：
+    - 将 `copy_range(..., share)` 的 `share` 参数改为 `1`，使父子页表项共享同一物理页。
+
+- 在 `copy_range` 按 `share` 分支：
+    - `share==1` 时不分配新页，子进程 PTE 指向父进程物理页，并改权限为只读且打上 `PTE_COW`；同时父进程对应 PTE 也移除 `PTE_W`、加 `PTE_COW`，并 `tlb_invalidate` 刷新。
+    - `share==0` 维持原先深拷贝逻辑：`alloc_page` + `memcpy` + `page_insert`。
+
+- 缺页处理 `do_pgfault`（`kern/mm/vmm.c`）：
+    - 对 `CAUSE_STORE_PAGE_FAULT` 且 `PTE_COW` 的页：
+        - 若 `page->ref == 1`，仅清除 `PTE_COW` 并恢复 `PTE_W`，刷新 TLB。
+        - 若 `page->ref > 1`，分配新页，复制内容，`page_insert` 建立可写映射，移除 `PTE_COW`，从而实现写时复制。
+    - 对未映射的地址，按需分配页并依据 `vma` 权限设置 `PTE_R/W/X`。
+    - 在 `trap.c` 将页故障统一分派到 `do_pgfault`，出现异常无法处理则 `do_exit(-E_KILLED)`。
+
+### 3. 测试用例与运行
+
+- 用户程序：`user/cowtest.c`，逻辑为父进程设置 `value=100`，`fork` 后子进程写为 `200` 触发 COW，父进程 `wait` 后再次读取应仍为 `100`。
+- 启动程序：在 `kern/process/proc.c` 的 `user_main` 中将默认 `KERNEL_EXECVE(exit)` 改为 `KERNEL_EXECVE(cowtest)`，使系统启动后直接运行该测试。
+- 期望输出包含：
+    - 子进程写前读到 `100`；写入时触发 `Store Page Fault`，`do_pgfault` 路径检测到 `PTE_COW` 并执行复制；写后读到 `200`。
+    - 父进程在子退出后读到 `100`，打印 “COW Test Passed”。
+
+### 4. COW 状态转换与一致性说明
+
+- Exclusive：`ref==1`，可写，无 `PTE_COW`。
+- Shared(COW)：`ref>1`，只读 + `PTE_COW`，出现在 `fork` 之后。
+- Shared-Last：`ref==1` 但仍为只读 + `PTE_COW`，写异常时直接恢复可写无须复制。
+
+- 写路径：Shared(写) → 触发缺页 →
+    - `ref>1`：分配新页 + 复制，当前进程变为 Exclusive；旧页 `ref--`（可能仍 Shared）。
+    - `ref==1`：直接去除 `PTE_COW` 并恢复 `PTE_W`。
+
+### 5. 与常见 OS 的装载差异（为何测试程序可“预置”）
+
+- 本实验环境的用户程序以二进制数组形式嵌入内核镜像，内核在 `user_main` 中通过 `KERNEL_EXECVE(...)` 将其拷贝与映射到用户地址空间后运行。
+- 常见 OS 会从文件系统读取 ELF，结合按需分页与动态链接器装载；实验为教学简化，聚焦页表与内存管理（含 COW/缺页），不依赖存储栈与文件系统。
+
 ## 分支任务：gdb 调试系统调用（ecall / sret）
 
 目的：使用双重 GDB（Host 附加 QEMU，Guest 连接 QEMU gdbstub）观察用户态发起 `ecall`、内核处理、以及通过 `sret` 返回用户态的完整流程；并阅读 QEMU 中相关翻译与 helper 实现以解释关键细节。
