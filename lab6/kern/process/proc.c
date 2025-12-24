@@ -89,40 +89,31 @@ alloc_proc(void)
     struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
     if (proc != NULL)
     {
-        // LAB4:填写你在lab4中实现的代码
-        /*
-         * below fields in proc_struct need to be initialized
-         *       enum proc_state state;                      // Process state
-         *       int pid;                                    // Process ID
-         *       int runs;                                   // the running times of Proces
-         *       uintptr_t kstack;                           // Process kernel stack
-         *       volatile bool need_resched;                 // bool value: need to be rescheduled to release CPU?
-         *       struct proc_struct *parent;                 // the parent process
-         *       struct mm_struct *mm;                       // Process's memory management field
-         *       struct context context;                     // Switch here to run process
-         *       struct trapframe *tf;                       // Trap frame for current interrupt
-         *       uintptr_t pgdir;                            // the base addr of Page Directroy Table(PDT)
-         *       uint32_t flags;                             // Process flag
-         *       char name[PROC_NAME_LEN + 1];               // Process name
-         */
+        // 基本字段
+        proc->state = PROC_UNINIT;
+        proc->pid = -1;
+        proc->runs = 0;
+        proc->kstack = 0;
+        proc->need_resched = 0;
+        proc->parent = NULL;
+        proc->mm = NULL;
+        memset(&(proc->context), 0, sizeof(struct context));
+        proc->tf = NULL;
+        proc->pgdir = 0;
+        proc->flags = 0;
+        memset(proc->name, 0, sizeof(proc->name));
 
-        // LAB5:填写你在lab5中实现的代码 (update LAB4 steps)
-        /*
-         * below fields(add in LAB5) in proc_struct need to be initialized
-         *       uint32_t wait_state;                        // waiting state
-         *       struct proc_struct *cptr, *yptr, *optr;     // relations between processes
-         */
+        // 进程关系与等待状态
+        proc->wait_state = 0;
+        proc->cptr = proc->yptr = proc->optr = NULL;
 
-        // LAB6:YOUR CODE (update LAB5 steps)
-        /*
-         * below fields(add in LAB6) in proc_struct need to be initialized
-         *       struct run_queue *rq;                       // run queue contains Process
-         *       list_entry_t run_link;                      // the entry linked in run queue
-         *       int time_slice;                             // time slice for occupying the CPU
-         *       skew_heap_entry_t lab6_run_pool;            // entry in the run pool (lab6 stride)
-         *       uint32_t lab6_stride;                       // stride value (lab6 stride)
-         *       uint32_t lab6_priority;                     // priority value (lab6 stride)
-         */
+        // 就绪队列相关（lab6）
+        proc->rq = NULL;
+        list_init(&proc->run_link);
+        proc->time_slice = 0;
+        skew_heap_init(&proc->lab6_run_pool);
+        proc->lab6_stride = 0;
+        proc->lab6_priority = 1; // 默认最低优先级 1，避免除零
     }
     return proc;
 }
@@ -227,15 +218,25 @@ void proc_run(struct proc_struct *proc)
 {
     if (proc != current)
     {
-        // LAB4:填写你在lab4中实现的代码
-        /*
-         * Some Useful MACROs, Functions and DEFINEs, you can use them in below implementation.
-         * MACROs or Functions:
-         *   local_intr_save():        Disable interrupts
-         *   local_intr_restore():     Enable Interrupts
-         *   lsatp():                   Modify the value of satp register
-         *   switch_to():              Context switching between two processes
-         */
+        bool intr_flag;
+        struct proc_struct *prev = current, *next = proc;
+
+        // 关中断，防止上下文切换时被打断
+        local_intr_save(intr_flag);
+
+        // 更新 current 指针
+        current = next;
+
+        // 切换页表（修改 satp），使用目标进程的根页表物理地址（统一使用 lsatp 封装）
+        lsatp(next->pgdir);
+        // 刷新TLB，确保地址空间切换生效
+        __asm__ __volatile__("sfence.vma" ::: "memory");
+
+        // 进行上下文切换
+        switch_to(&(prev->context), &(next->context));
+
+        // 恢复中断
+        local_intr_restore(intr_flag);
     }
 }
 
@@ -319,7 +320,8 @@ put_kstack(struct proc_struct *proc)
 static int
 setup_pgdir(struct mm_struct *mm)
 {
-    struct Page *page;
+    struct Page *page = NULL;
+    struct Page *last = NULL;
     if ((page = alloc_page()) == NULL)
     {
         return -E_NO_MEM;
@@ -399,7 +401,23 @@ copy_thread(struct proc_struct *proc, uintptr_t esp, struct trapframe *tf)
 
     // Set a0 to 0 so a child process knows it's just forked
     proc->tf->gpr.a0 = 0;
-    proc->tf->gpr.sp = (esp == 0) ? (uintptr_t)proc->tf : esp;
+    // 计算子进程栈指针：
+    // - 用户 fork: 继承父进程用户 sp (tf->gpr.sp)
+    // - 内核线程: 若未显式提供 esp，使用新分配的内核栈顶
+    uintptr_t new_sp;
+    if (esp != 0)
+    {
+        new_sp = esp;
+    }
+    else if (tf->gpr.sp != 0)
+    {
+        new_sp = tf->gpr.sp;
+    }
+    else
+    {
+        new_sp = proc->kstack + KSTACKSIZE;
+    }
+    proc->tf->gpr.sp = new_sp;
 
     proc->context.ra = (uintptr_t)forkret;
     proc->context.sp = (uintptr_t)(proc->tf);
@@ -452,6 +470,53 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
      *    update step 1: set child proc's parent to current process, make sure current process's wait_state is 0
      *    update step 5: insert proc_struct into hash_list && proc_list, set the relation links of process
      */
+    // 1. 分配 proc_struct
+    if ((proc = alloc_proc()) == NULL)
+    {
+        goto fork_out;
+    }
+
+    // 2. 分配内核栈
+    if (setup_kstack(proc) != 0)
+    {
+        goto bad_fork_cleanup_proc;
+    }
+
+    // 3. 复制或共享 mm (内存空间)
+    if (copy_mm(clone_flags, proc) != 0)
+    {
+        goto bad_fork_cleanup_kstack;
+    }
+
+    // 4. 设置中断帧、上下文
+    copy_thread(proc, stack, tf);
+
+    // 5. 分配 PID
+    proc->pid = get_pid();
+
+    // 6. 设置父子关系
+    proc->parent = current;
+    current->wait_state = 0;
+
+    // 7. 继承/设置页表：本实验内核线程共享内核页表
+    // If proc->mm is NULL (kernel thread), use kernel page directory.
+    // Otherwise, copy_mm already set proc->pgdir to the physical address
+    // of the newly created mm->pgdir and we must not override it.
+    if (proc->mm == NULL)
+    {
+        proc->pgdir = boot_pgdir_pa;
+    }
+
+    // 8. 插入到 proc_list 并维护父子关系，同时加入 hash_list
+    hash_proc(proc);
+    set_links(proc);
+
+    // 9. 进程状态改为可运行（由 wakeup_proc 完成）
+    wakeup_proc(proc);
+
+    // 返回子进程 pid
+    ret = proc->pid;
+    cprintf("do_fork: parent=%d created child=%d\n", current->pid, ret);
 
 fork_out:
     return ret;
@@ -533,6 +598,7 @@ int do_exit(int error_code)
 static int
 load_icode(unsigned char *binary, size_t size)
 {
+    assert(binary != NULL);
     if (current->mm != NULL)
     {
         panic("load_icode: current->mm must be empty.\n");
@@ -552,10 +618,13 @@ load_icode(unsigned char *binary, size_t size)
     }
     //(3) copy TEXT/DATA section, build BSS parts in binary to memory space of process
     struct Page *page;
+    struct Page *last = NULL;
     //(3.1) get the file header of the bianry program (ELF format)
     struct elfhdr *elf = (struct elfhdr *)binary;
     //(3.2) get the entry of the program section headers of the bianry program (ELF format)
     struct proghdr *ph = (struct proghdr *)(binary + elf->e_phoff);
+        cprintf("load_icode: ELF magic=0x%08x entry=0x%lx phoff=%lu phnum=%u\n",
+            elf->e_magic, (unsigned long)elf->e_entry, (unsigned long)elf->e_phoff, (unsigned)elf->e_phnum);
     //(3.3) This program is valid?
     if (elf->e_magic != ELF_MAGIC)
     {
@@ -615,6 +684,7 @@ load_icode(unsigned char *binary, size_t size)
             {
                 goto bad_cleanup_mmap;
             }
+            last = page;
             off = start - la, size = PGSIZE - off, la += PGSIZE;
             if (end < la)
             {
@@ -638,7 +708,8 @@ load_icode(unsigned char *binary, size_t size)
             {
                 size -= la - end;
             }
-            memset(page2kva(page) + off, 0, size);
+            assert(last != NULL);
+            memset(page2kva(last) + off, 0, size);
             start += size;
             assert((end < la && start == end) || (end >= la && start == la));
         }
@@ -675,9 +746,12 @@ load_icode(unsigned char *binary, size_t size)
     lsatp(PADDR(mm->pgdir));
 
     //(6) setup trapframe for user environment
+    assert(current->tf != NULL);
     struct trapframe *tf = current->tf;
     // Keep sstatus
-    uintptr_t sstatus = tf->status;
+        uintptr_t sstatus = tf->status;
+        cprintf("load_icode: old tf->status=0x%lx SSTATUS_SPP=0x%lx SSTATUS_SPIE=0x%lx SSTATUS_SIE=0x%lx\n",
+            (unsigned long)sstatus, (unsigned long)SSTATUS_SPP, (unsigned long)SSTATUS_SPIE, (unsigned long)SSTATUS_SIE);
     memset(tf, 0, sizeof(struct trapframe));
     /* LAB5:填写你在lab5中实现的代码
      * should set tf_cs,tf_ds,tf_es,tf_ss,tf_esp,tf_eip,tf_eflags
@@ -688,7 +762,34 @@ load_icode(unsigned char *binary, size_t size)
      *          tf_eip should be the entry point of this binary program (elf->e_entry)
      *          tf_eflags should be set to enable computer to produce Interrupt
      */
-
+    /* Set user stack pointer to the top of the user stack */
+    tf->gpr.sp = USTACKTOP;
+    /* Set the program counter to the ELF entry point */
+    tf->epc = elf->e_entry;
+            {
+                unsigned long *pstatus = (unsigned long *)((char *)tf + 32 * REGBYTES);
+                cprintf("load_icode: set tf->epc=0x%lx, tf->sp=0x%lx, tf->status=0x%lx [mem=0x%lx]\n",
+                        (unsigned long)tf->epc, (unsigned long)tf->gpr.sp, (unsigned long)tf->status, *pstatus);
+            }
+    /* Prepare sstatus for returning to user mode:
+     * - clear SPP (previous privilege = User)
+     * - set SPIE so interrupts will be enabled after sret
+     * - clear SIE in the saved status to keep interrupts disabled until sret restores SPIE
+     */
+    tf->status = (sstatus & ~SSTATUS_SPP) | SSTATUS_SPIE;
+    tf->status &= ~SSTATUS_SIE;
+    // Also write raw status at the trapframe offset expected by RESTORE_ALL
+    {
+        unsigned long *pstatus = (unsigned long *)((char *)tf + 32 * REGBYTES);
+        if (*pstatus == 0)
+        {
+            *pstatus = SSTATUS_SPIE;
+        }
+    }
+    if (tf->status == 0)
+    {
+        tf->status = 0x8000000000046120UL; // force a known-good sstatus pattern (SPP=0,SPIE=1,SIE=0,SUM=1,XL fields)
+    }
     ret = 0;
 out:
     return ret;
@@ -858,6 +959,8 @@ kernel_execve(const char *name, unsigned char *binary, size_t size)
     memcpy(new_tf, old_tf, sizeof(struct trapframe));
     current->tf = new_tf;
     ret = do_execve(name, len, binary, size);
+    cprintf("kernel_execve: new_tf epc=0x%lx sp=0x%lx status=0x%lx\n",
+            (unsigned long)new_tf->epc, (unsigned long)new_tf->gpr.sp, (unsigned long)new_tf->status);
     asm volatile(
         "mv sp, %0\n"
         "j __trapret\n"
