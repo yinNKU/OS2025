@@ -105,6 +105,18 @@ alloc_proc(void)
          *       uint32_t flags;                             // Process flag
          *       char name[PROC_NAME_LEN + 1];               // Process name
          */
+        proc->state = PROC_UNINIT;
+        proc->pid = -1;
+        proc->runs = 0;
+        proc->kstack = 0;
+        proc->need_resched = 0;
+        proc->parent = NULL;
+        proc->mm = NULL;
+        memset(&(proc->context), 0, sizeof(struct context));
+        proc->tf = NULL;
+        proc->pgdir = 0;
+        proc->flags = 0;
+        memset(proc->name, 0, PROC_NAME_LEN + 1);
 
         // LAB5:填写你在lab5中实现的代码 (update LAB4 steps)
         /*
@@ -112,6 +124,8 @@ alloc_proc(void)
          *       uint32_t wait_state;                        // waiting state
          *       struct proc_struct *cptr, *yptr, *optr;     // relations between processes
          */
+        proc->wait_state = 0;
+        proc->cptr = proc->optr = proc->yptr = NULL;
 
         // LAB6:YOUR CODE (update LAB5 steps)
         /*
@@ -123,6 +137,12 @@ alloc_proc(void)
          *       uint32_t lab6_stride;                       // stride value (lab6 stride)
          *       uint32_t lab6_priority;                     // priority value (lab6 stride)
          */
+        proc->rq = NULL;
+        list_init(&(proc->run_link));
+        proc->time_slice = 0;
+        proc->lab6_run_pool.left = proc->lab6_run_pool.right = proc->lab6_run_pool.parent = NULL;
+        proc->lab6_stride = 0;
+        proc->lab6_priority = 0;
     }
     return proc;
 }
@@ -236,6 +256,20 @@ void proc_run(struct proc_struct *proc)
          *   lsatp():                   Modify the value of satp register
          *   switch_to():              Context switching between two processes
          */
+        bool intr_flag;
+        struct proc_struct *prev = current, *next = proc;
+        local_intr_save(intr_flag);
+        {
+            current = proc;
+            if (next->pgdir) {
+                lsatp(next->pgdir);
+            } else {
+                lsatp(boot_pgdir_pa);
+            }
+            asm volatile("sfence.vma");
+            switch_to(&(prev->context), &(next->context));
+        }
+        local_intr_restore(intr_flag);
     }
 }
 
@@ -438,12 +472,42 @@ int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
      */
 
     //    1. call alloc_proc to allocate a proc_struct
+    if ((proc = alloc_proc()) == NULL)
+    {
+        goto fork_out;
+    }
+    proc->parent = current;
+
     //    2. call setup_kstack to allocate a kernel stack for child process
+    if (setup_kstack(proc) != 0)
+    {
+        goto bad_fork_cleanup_proc;
+    }
+
     //    3. call copy_mm to dup OR share mm according clone_flag
+    if (copy_mm(clone_flags, proc) != 0)
+    {
+        goto bad_fork_cleanup_kstack;
+    }
+
     //    4. call copy_thread to setup tf & context in proc_struct
+    copy_thread(proc, stack, tf);
+
     //    5. insert proc_struct into hash_list && proc_list
+    bool intr_flag;
+    local_intr_save(intr_flag);
+    {
+        proc->pid = get_pid();
+        hash_proc(proc);
+        set_links(proc);
+    }
+    local_intr_restore(intr_flag);
+
     //    6. call wakeup_proc to make the new child process RUNNABLE
+    wakeup_proc(proc);
+
     //    7. set ret vaule using child proc's pid
+    ret = proc->pid;
 
     // LAB5:填写你在lab5中实现的代码 (update LAB4 steps)
     /* Some Functions
@@ -551,7 +615,7 @@ load_icode(unsigned char *binary, size_t size)
         goto bad_pgdir_cleanup_mm;
     }
     //(3) copy TEXT/DATA section, build BSS parts in binary to memory space of process
-    struct Page *page;
+    struct Page *page = NULL;
     //(3.1) get the file header of the bianry program (ELF format)
     struct elfhdr *elf = (struct elfhdr *)binary;
     //(3.2) get the entry of the program section headers of the bianry program (ELF format)
@@ -688,6 +752,9 @@ load_icode(unsigned char *binary, size_t size)
      *          tf_eip should be the entry point of this binary program (elf->e_entry)
      *          tf_eflags should be set to enable computer to produce Interrupt
      */
+    tf->gpr.sp = USTACKTOP;
+    tf->epc = elf->e_entry;
+    tf->status = (read_csr(sstatus) | SSTATUS_SPIE) & ~SSTATUS_SPP & ~SSTATUS_SIE;
 
     ret = 0;
 out:
@@ -891,6 +958,7 @@ kernel_execve(const char *name, unsigned char *binary, size_t size)
 static int
 user_main(void *arg)
 {
+    cprintf("user_main start\n");
 #ifdef TEST
     KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
 #else
@@ -905,7 +973,6 @@ init_main(void *arg)
 {
     size_t nr_free_pages_store = nr_free_pages();
     size_t kernel_allocated_store = kallocated();
-
     int pid = kernel_thread(user_main, NULL, 0);
     if (pid <= 0)
     {
@@ -932,7 +999,7 @@ init_main(void *arg)
 void proc_init(void)
 {
     int i;
-
+    cprintf("proc_init start\n");
     list_init(&proc_list);
     for (i = 0; i < HASH_LIST_SIZE; i++)
     {
@@ -954,6 +1021,7 @@ void proc_init(void)
     current = idleproc;
 
     int pid = kernel_thread(init_main, NULL, 0);
+    cprintf("proc_init: init_main pid=%d\n", pid);
     if (pid <= 0)
     {
         panic("create init_main failed.\n");

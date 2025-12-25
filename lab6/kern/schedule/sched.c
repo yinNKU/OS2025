@@ -101,6 +101,7 @@ void schedule(void)
         }
         if (next == NULL)
         {
+            cprintf("schedule: no runnable process, run idleproc\n");
             next = idleproc;
         }
         next->runs++;
