@@ -4,6 +4,9 @@
 #include <ide.h>
 #include <pmm.h>
 #include <assert.h>
+
+#define swap_offset(entry) ((entry) >> 8)
+
 size_t max_swap_offset;
 void swapfs_init(void)
 {
